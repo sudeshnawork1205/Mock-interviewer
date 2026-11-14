@@ -1,0 +1,6 @@
+{
+  "name": "InterviewAce — AI Mock Interviewer",
+  "description": "End-to-end AI mock interviewer with Gemini structured evaluation, MediaPipe FaceLandmarker body language coaching, Web Speech transcription, PDF resume parsing, and performance analytics.",
+  "requestFramePermissions": ["microphone", "camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
