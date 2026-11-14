@@ -37,8 +37,8 @@ export const PERSONAS: Record<PersonaId, PersonaConfig> = {
     subtitle: 'Warm & Encouraging',
     difficultyBand: 'Easy – Medium',
     description: 'Supportive pacing, gentle follow-ups, and constructive feedback that leads with what went well.',
-    voicePitch: 1.08,
-    voiceRate: 0.96,
+    voicePitch: 1.0,
+    voiceRate: 0.98,
     bridgePhrases: [
       'Thank you for sharing that — could I ask one quick follow-up to understand a bit more?',
       'That gives me good context. Let me ask one clarifying question before we move on.',
@@ -53,8 +53,8 @@ export const PERSONAS: Record<PersonaId, PersonaConfig> = {
     subtitle: 'Precise & Depth-Focused',
     difficultyBand: 'Medium – Hard',
     description: 'Probes for system trade-offs, edge cases, and root-cause reasoning with blunt, fair critiques.',
-    voicePitch: 0.94,
-    voiceRate: 1.02,
+    voicePitch: 1.0,
+    voiceRate: 1.0,
     bridgePhrases: [
       'Interesting, let me dig into that. Walk me through the exact trade-off there.',
       'Hold on — I want to press on the technical details of that decision.',
@@ -70,7 +70,7 @@ export const PERSONAS: Record<PersonaId, PersonaConfig> = {
     difficultyBand: 'Hard',
     description: 'Challenges assumptions, demands measurable business impact, and flags vague claims immediately.',
     voicePitch: 1.0,
-    voiceRate: 1.12,
+    voiceRate: 1.03,
     bridgePhrases: [
       'Stop right there — give me the concrete outcome and what you personally owned.',
       'That sounds high-level. Narrow it down: what changed because of your action?',

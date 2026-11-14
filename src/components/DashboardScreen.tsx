@@ -7,6 +7,7 @@ import {
   Eye,
   FileDown,
   Mic,
+  Play,
   Plus,
   RotateCcw,
   Target,
@@ -25,6 +26,7 @@ interface DashboardScreenProps {
   result: InterviewSessionResult;
   onRetrySame: () => void;
   onNewInterview: () => void;
+  onPracticeDrillPrompt: (promptText: string) => void;
 }
 
 function getVerdictStyle(verdict: VerdictLabel): {
@@ -69,6 +71,7 @@ export function DashboardScreen({
   result,
   onRetrySame,
   onNewInterview,
+  onPracticeDrillPrompt,
 }: DashboardScreenProps) {
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>(() => {
     const firstId = result.attempts[0]?.question.id;
@@ -91,7 +94,6 @@ export function DashboardScreen({
     [result.attempts]
   );
 
-  // Aggregate axis averages
   const axisAverages = useMemo(() => {
     if (scoredAttempts.length === 0) {
       return { relevance: 0, depth: 0, clarity: 0, structure: 0, confidence: 0 };
@@ -119,7 +121,6 @@ export function DashboardScreen({
     };
   }, [scoredAttempts]);
 
-  // Aggregate Voice Delivery metrics
   const voiceStats = useMemo(() => {
     const answered = scoredAttempts;
     if (answered.length === 0) {
@@ -175,7 +176,6 @@ export function DashboardScreen({
     };
   }, [scoredAttempts]);
 
-  // STAR Method Tracker
   const starStats = useMemo(() => {
     const behavioral = scoredAttempts.filter((a) => a.evaluation?.star.applicable);
     if (behavioral.length === 0) {
@@ -196,7 +196,6 @@ export function DashboardScreen({
     };
   }, [scoredAttempts]);
 
-  // Job-Fit Skills Coverage
   const jobFit = useMemo(() => {
     const demonstrated = new Set<string>();
     for (const a of scoredAttempts) {
@@ -225,19 +224,16 @@ export function DashboardScreen({
     };
   }, [result.jdSkills, scoredAttempts]);
 
-  // Follow-up Insights
   const followUpAttempts = useMemo(
     () => result.attempts.filter((a) => a.followUpQuestion),
     [result.attempts]
   );
 
-  // Vision interval samples
   const visionAttempts = useMemo(
     () => result.attempts.filter((a) => a.visionSummary && a.visionSummary.sampleCount > 0),
     [result.attempts]
   );
 
-  // Render Chart.js visualizations
   useEffect(() => {
     const charts: Chart[] = [];
 
@@ -420,10 +416,19 @@ export function DashboardScreen({
       voiceURI: result.config.selectedVoiceURI,
       pitch: persona.voicePitch,
       rate: persona.voiceRate,
+      personaId: result.config.persona,
+      apiKey: result.config.apiKey,
+      demoMode: result.config.demoMode,
       onStart: () => setSpeakingQuestionId(questionId),
       onEnd: () => setSpeakingQuestionId(null),
     });
   };
+
+  // SVG circular ring math for Job-Fit %
+  const ringRadius = 22;
+  const ringCircumference = 2 * Math.PI * ringRadius;
+  const ringOffset =
+    ringCircumference - (jobFit.matchPct / 100) * ringCircumference;
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
@@ -677,16 +682,43 @@ export function DashboardScreen({
           )}
         </section>
 
-        {/* Job-Fit Card */}
+        {/* Job-Fit Card with Circular JD Match % Ring */}
         <section className="bg-white border border-slate-200 rounded-xl p-6 space-y-4 print-break-inside-avoid print-flat-card">
           <div className="flex items-center justify-between border-b border-slate-100 pb-3">
             <div className="inline-flex items-center gap-2 text-base font-semibold text-slate-900">
               <Target className="w-4 h-4 text-blue-600" />
               Role &amp; Job-Fit Coverage
             </div>
-            <span className="text-sm font-bold font-mono tabular-nums text-slate-900">
-              {jobFit.matchPct}% Match
-            </span>
+
+            <div className="flex items-center gap-2.5">
+              <svg className="w-12 h-12 -rotate-90" viewBox="0 0 56 56" aria-hidden="true">
+                <circle
+                  cx="28"
+                  cy="28"
+                  r={ringRadius}
+                  stroke="#E2E8F0"
+                  strokeWidth="5"
+                  fill="none"
+                />
+                <circle
+                  cx="28"
+                  cy="28"
+                  r={ringRadius}
+                  stroke="#2563EB"
+                  strokeWidth="5"
+                  strokeDasharray={ringCircumference}
+                  strokeDashoffset={ringOffset}
+                  strokeLinecap="round"
+                  fill="none"
+                />
+              </svg>
+              <div className="text-right">
+                <div className="text-sm font-bold font-mono tabular-nums text-slate-900">
+                  {jobFit.matchPct}%
+                </div>
+                <div className="text-[11px] text-slate-500">JD Match</div>
+              </div>
+            </div>
           </div>
 
           <div className="space-y-3 text-xs">
@@ -803,15 +835,28 @@ export function DashboardScreen({
         </div>
 
         {result.summary.practice_questions.length > 0 && (
-          <div className="pt-4 border-t border-slate-100 space-y-2">
+          <div className="pt-4 border-t border-slate-100 space-y-3">
             <h3 className="text-sm font-semibold text-slate-900">
               Recommended Drill Prompts
             </h3>
-            <ul className="list-disc pl-5 text-xs text-slate-700 space-y-1">
+            <div className="space-y-2">
               {result.summary.practice_questions.map((pq, i) => (
-                <li key={i}>{pq}</li>
+                <div
+                  key={i}
+                  className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3 rounded-lg bg-slate-50 border border-slate-200"
+                >
+                  <p className="text-xs text-slate-700">{pq}</p>
+                  <button
+                    type="button"
+                    onClick={() => onPracticeDrillPrompt(pq)}
+                    className="no-print inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-700 bg-white border border-blue-200 hover:bg-blue-50 rounded-md whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Play className="w-3 h-3" />
+                    Practice Prompt
+                  </button>
+                </div>
               ))}
-            </ul>
+            </div>
           </div>
         )}
       </section>

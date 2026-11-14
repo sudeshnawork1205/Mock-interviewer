@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import type {
   AppScreen,
@@ -14,9 +14,28 @@ import {
   loadStoredApiKey,
   persistApiKey,
 } from './services/geminiClient';
+import {
+  clearSessionHistory,
+  loadSessionHistory,
+  saveSessionToHistory,
+} from './services/sessionHistory';
+import {
+  prefetchSpeechAudio,
+  unlockAudioPlayback,
+} from './services/speechService';
 import { SetupScreen } from './components/SetupScreen';
-import { LiveInterviewScreen } from './components/LiveInterviewScreen';
-import { DashboardScreen } from './components/DashboardScreen';
+
+const LiveInterviewScreen = lazy(() =>
+  import('./components/LiveInterviewScreen').then((m) => ({
+    default: m.LiveInterviewScreen,
+  }))
+);
+
+const DashboardScreen = lazy(() =>
+  import('./components/DashboardScreen').then((m) => ({
+    default: m.DashboardScreen,
+  }))
+);
 
 function createInitialConfig(): InterviewSetupConfig {
   const storedKey = loadStoredApiKey();
@@ -59,6 +78,9 @@ export default function App() {
 
   const [sessionResult, setSessionResult] =
     useState<InterviewSessionResult | null>(null);
+  const [history, setHistory] = useState<InterviewSessionResult[]>(() =>
+    loadSessionHistory()
+  );
   const [isSummarizing, setIsSummarizing] = useState(false);
 
   useEffect(() => {
@@ -67,7 +89,6 @@ export default function App() {
     });
   }, []);
 
-  // Sync API key persistence to localStorage whenever key or remember checkbox updates
   useEffect(() => {
     persistApiKey(config.apiKey, config.rememberApiKey);
   }, [config.apiKey, config.rememberApiKey]);
@@ -75,11 +96,29 @@ export default function App() {
   const handleStartInterview = useCallback(async () => {
     setIsStarting(true);
     setStartError(null);
+    unlockAudioPlayback();
+
+    // Preload LiveInterviewScreen chunk and MediaPipe FaceLandmarker in parallel with Call A
+    void import('./components/LiveInterviewScreen');
+    if (config.webcamCoachEnabled) {
+      void import('./services/visionCoach')
+        .then((v) => v.getFaceLandmarker())
+        .catch(() => {});
+    }
 
     try {
       const res = await fetchInterviewQuestions(config, {
         allowFallbackOnError: config.demoMode,
       });
+
+      const firstQ = res.data.questions[0]?.question;
+      if (firstQ) {
+        prefetchSpeechAudio(firstQ, {
+          personaId: config.persona,
+          apiKey: config.apiKey,
+          demoMode: config.demoMode,
+        });
+      }
 
       setQuestions(res.data.questions);
       setJdSkills(
@@ -107,6 +146,7 @@ export default function App() {
   const handleCompleteSession = useCallback(
     async (attempts: QuestionAttempt[], evalFallbackCount: number) => {
       setIsSummarizing(true);
+      void import('./components/DashboardScreen');
 
       const scoredAttempts = attempts.filter((a) => !a.skipped && a.evaluation);
       const overallScore =
@@ -173,7 +213,7 @@ export default function App() {
           ? config.customRole.trim() || 'Generalist'
           : config.role;
 
-      setSessionResult({
+      const finalResult: InterviewSessionResult = {
         config,
         effectiveRole,
         candidateName,
@@ -188,8 +228,10 @@ export default function App() {
         usedFallbackCount:
           initFallbackCount + evalFallbackCount + (summaryRes.usedFallback ? 1 : 0),
         completedAt: new Date().toISOString(),
-      });
+      };
 
+      setSessionResult(finalResult);
+      setHistory(saveSessionToHistory(finalResult));
       setIsSummarizing(false);
       setScreen('dashboard');
     },
@@ -207,6 +249,39 @@ export default function App() {
     setScreen('setup');
   }, []);
 
+  const handlePracticeDrillPrompt = useCallback((promptText: string) => {
+    const drillQuestion: InterviewQuestion = {
+      id: 'drill-1',
+      question: promptText,
+      category: 'Focused Drill',
+      competency: 'Targeted Practice',
+      difficulty: 'Medium',
+      source: 'general',
+      rubric: [
+        'States clear context and personal ownership',
+        'Includes concrete actions and evaluated trade-offs',
+        'Closes with quantified impact or lesson learned',
+      ],
+      ideal_duration_seconds: 90,
+    };
+    setQuestions([drillQuestion]);
+    setSessionResult(null);
+    setScreen('live');
+  }, []);
+
+  const handleOpenHistorySession = useCallback(
+    (past: InterviewSessionResult) => {
+      setSessionResult(past);
+      setScreen('dashboard');
+    },
+    []
+  );
+
+  const handleClearHistory = useCallback(() => {
+    clearSessionHistory();
+    setHistory([]);
+  }, []);
+
   const transitionProps = shouldReduceMotion
     ? { initial: { opacity: 1 }, animate: { opacity: 1 }, exit: { opacity: 1 } }
     : {
@@ -215,6 +290,13 @@ export default function App() {
         exit: { opacity: 0, y: -8 },
         transition: { duration: 0.18, ease: [0.16, 1, 0.3, 1] as const },
       };
+
+  const screenFallback = (
+    <div className="max-w-3xl mx-auto px-4 py-20 text-center space-y-3">
+      <div className="w-7 h-7 border-2 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto" />
+      <p className="text-sm text-slate-500">Loading view...</p>
+    </div>
+  );
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
@@ -318,44 +400,50 @@ export default function App() {
             </p>
           </div>
         ) : (
-          <AnimatePresence mode="wait">
-            {screen === 'setup' && (
-              <motion.div key="setup" {...transitionProps}>
-                <SetupScreen
-                  config={config}
-                  hasServerKey={hasServerKey}
-                  isStarting={isStarting}
-                  startError={startError}
-                  onChangeConfig={setConfig}
-                  onStartInterview={() => void handleStartInterview()}
-                />
-              </motion.div>
-            )}
+          <Suspense fallback={screenFallback}>
+            <AnimatePresence mode="wait">
+              {screen === 'setup' && (
+                <motion.div key="setup" {...transitionProps}>
+                  <SetupScreen
+                    config={config}
+                    hasServerKey={hasServerKey}
+                    isStarting={isStarting}
+                    startError={startError}
+                    history={history}
+                    onChangeConfig={setConfig}
+                    onStartInterview={() => void handleStartInterview()}
+                    onOpenHistorySession={handleOpenHistorySession}
+                    onClearHistory={handleClearHistory}
+                  />
+                </motion.div>
+              )}
 
-            {screen === 'live' && questions.length > 0 && (
-              <motion.div key="live" {...transitionProps}>
-                <LiveInterviewScreen
-                  config={config}
-                  questions={questions}
-                  jdSkills={jdSkills}
-                  onCompleteSession={(attempts, count) =>
-                    void handleCompleteSession(attempts, count)
-                  }
-                  onAbortToSetup={handleNewInterview}
-                />
-              </motion.div>
-            )}
+              {screen === 'live' && questions.length > 0 && (
+                <motion.div key="live" {...transitionProps}>
+                  <LiveInterviewScreen
+                    config={config}
+                    questions={questions}
+                    jdSkills={jdSkills}
+                    onCompleteSession={(attempts, count) =>
+                      void handleCompleteSession(attempts, count)
+                    }
+                    onAbortToSetup={handleNewInterview}
+                  />
+                </motion.div>
+              )}
 
-            {screen === 'dashboard' && sessionResult && (
-              <motion.div key="dashboard" {...transitionProps}>
-                <DashboardScreen
-                  result={sessionResult}
-                  onRetrySame={handleRetrySame}
-                  onNewInterview={handleNewInterview}
-                />
-              </motion.div>
-            )}
-          </AnimatePresence>
+              {screen === 'dashboard' && sessionResult && (
+                <motion.div key="dashboard" {...transitionProps}>
+                  <DashboardScreen
+                    result={sessionResult}
+                    onRetrySame={handleRetrySame}
+                    onNewInterview={handleNewInterview}
+                    onPracticeDrillPrompt={handlePracticeDrillPrompt}
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </Suspense>
         )}
       </main>
     </div>

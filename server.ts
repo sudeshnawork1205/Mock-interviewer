@@ -2,13 +2,14 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT || 3000);
-const MODEL_ID = 'gemini-4-hydrogen';
+const PRIMARY_MODEL_ID = 'gemini-4-hydrogen';
+const FAST_MODEL_ID = 'gemini-3.1-flash-lite';
 
 const PERSONA_DIRECTIVES: Record<string, string> = {
   friendly_hr:
@@ -19,7 +20,7 @@ const PERSONA_DIRECTIVES: Record<string, string> = {
     'You are Meera, a busy startup CEO. Fast-paced, challenges assumptions, interrupts vague answers with sharp follow-ups, asks about impact and ownership. Questions Hard.',
 };
 
-function getClient(req: express.Request): GoogleGenAI {
+function getClient(req: express.Request, apiVersion?: string): GoogleGenAI {
   const headerKey = req.header('x-gemini-api-key')?.trim();
   const apiKey = headerKey || process.env.GEMINI_API_KEY?.trim();
 
@@ -32,6 +33,7 @@ function getClient(req: express.Request): GoogleGenAI {
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
+      ...(apiVersion ? { apiVersion } : {}),
       headers: {
         'User-Agent': 'aistudio-build',
       },
@@ -53,12 +55,87 @@ function stripMarkdownFences(raw: string): string {
   return text;
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
+function shouldFailoverError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  // Do not failover on invalid API keys or permission denials
+  if (/API_KEY_INVALID|invalid.*key|PERMISSION_DENIED|403|No Gemini API key/i.test(msg)) {
+    return false;
+  }
+  return true;
+}
+
+async function generateJsonWithFailover(
+  ai: GoogleGenAI,
+  params: {
+    contents: string;
+    systemInstruction: string;
+    responseSchema: Record<string, unknown>;
+    preferFastModel?: boolean;
+  }
+): Promise<unknown> {
+  const models = params.preferFastModel
+    ? [FAST_MODEL_ID, PRIMARY_MODEL_ID]
+    : [PRIMARY_MODEL_ID, FAST_MODEL_ID];
+
+  let lastErr: unknown;
+
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i];
+    const thinkingLevel =
+      model === FAST_MODEL_ID ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW;
+
+    try {
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model,
+          contents: params.contents,
+          config: {
+            thinkingConfig: { thinkingLevel },
+            systemInstruction: params.systemInstruction,
+            responseMimeType: 'application/json',
+            responseSchema: params.responseSchema,
+          },
+        }),
+        6500,
+        model
+      );
+      const rawText = response.text ?? '';
+      return JSON.parse(stripMarkdownFences(rawText));
+    } catch (err) {
+      lastErr = err;
+      if (!shouldFailoverError(err) || i === models.length - 1) {
+        throw err;
+      }
+    }
+  }
+
+  throw lastErr;
+}
+
 function formatApiError(err: unknown): { status: number; message: string } {
   const msg = err instanceof Error ? err.message : String(err);
   if (msg.includes('No Gemini API key')) {
     return { status: 400, message: msg };
   }
-  if (/API_KEY_INVALID|400|invalid.*key/i.test(msg)) {
+  if (/API_KEY_INVALID|invalid.*key/i.test(msg)) {
     return {
       status: 400,
       message: 'The Gemini API key appears invalid. Verify your key or enable Demo Mode.',
@@ -76,6 +153,13 @@ function formatApiError(err: unknown): { status: number; message: string } {
       message: 'Gemini API rate limit or quota exceeded. Wait briefly, retry, or use Demo Mode.',
     };
   }
+  if (/503|UNAVAILABLE|high demand|timed out/i.test(msg)) {
+    return {
+      status: 503,
+      message:
+        'Gemini API is currently experiencing high demand. Retry or launch immediately in Demo Mode.',
+    };
+  }
   return { status: 500, message: msg || 'Unexpected error calling Gemini API.' };
 }
 
@@ -90,7 +174,7 @@ async function createServer() {
     });
   });
 
-  // Call A: Question Generation
+  // Call A: Question Generation (uses fast low-latency model first with automatic failover)
   app.post('/api/gemini/questions', async (req, res) => {
     try {
       const ai = getClient(req);
@@ -136,68 +220,63 @@ Rules:
           : 'Extract 6 core industry skills for this role into jd_skills.'
       }
 3. Keep each spoken question under 35 words (optimized for text-to-speech). No bullet points or code blocks.
-4. Provide 3-4 concise hidden evaluation rubric points per question.
+4. Provide 3 concise evaluation rubric points per question.
 5. Tag each question source as "general", "resume", or "jd", and difficulty as "Easy", "Medium", or "Hard".
 
 Candidate Resume Context:
-${hasResume ? resumeText.slice(0, 5000) : 'None provided.'}
+${hasResume ? resumeText.slice(0, 3500) : 'None provided.'}
 Detected Resume Skills: ${(resumeSkills || []).join(', ') || 'None'}
 
 Job Description Context:
-${hasJd ? jdText.slice(0, 4000) : 'None provided.'}
+${hasJd ? jdText.slice(0, 3000) : 'None provided.'}
 Detected JD Skills: ${(jdSkills || []).join(', ') || 'None'}`;
 
-      const response = await ai.models.generateContent({
-        model: MODEL_ID,
+      const parsed = await generateJsonWithFailover(ai, {
         contents: prompt,
-        config: {
-          systemInstruction: `${personaDirective}\nYou are a senior hiring manager designing structured interview questions. Return strictly valid JSON matching the schema.`,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              candidate_name: { type: Type.STRING, nullable: true },
-              jd_skills: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-              },
-              questions: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    id: { type: Type.STRING },
-                    question: { type: Type.STRING },
-                    category: { type: Type.STRING },
-                    competency: { type: Type.STRING },
-                    difficulty: { type: Type.STRING },
-                    source: { type: Type.STRING },
-                    rubric: {
-                      type: Type.ARRAY,
-                      items: { type: Type.STRING },
-                    },
-                    ideal_duration_seconds: { type: Type.INTEGER },
+        systemInstruction: `${personaDirective}\nYou are a senior hiring manager designing structured interview questions. Return strictly valid JSON matching the schema.`,
+        preferFastModel: true,
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            candidate_name: { type: Type.STRING, nullable: true },
+            jd_skills: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+            questions: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  id: { type: Type.STRING },
+                  question: { type: Type.STRING },
+                  category: { type: Type.STRING },
+                  competency: { type: Type.STRING },
+                  difficulty: { type: Type.STRING },
+                  source: { type: Type.STRING },
+                  rubric: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
                   },
-                  required: [
-                    'id',
-                    'question',
-                    'category',
-                    'competency',
-                    'difficulty',
-                    'source',
-                    'rubric',
-                    'ideal_duration_seconds',
-                  ],
+                  ideal_duration_seconds: { type: Type.INTEGER },
                 },
+                required: [
+                  'id',
+                  'question',
+                  'category',
+                  'competency',
+                  'difficulty',
+                  'source',
+                  'rubric',
+                  'ideal_duration_seconds',
+                ],
               },
             },
-            required: ['jd_skills', 'questions'],
           },
+          required: ['jd_skills', 'questions'],
         },
       });
 
-      const rawText = response.text ?? '';
-      const parsed = JSON.parse(stripMarkdownFences(rawText));
       res.json(parsed);
     } catch (err) {
       const { status, message } = formatApiError(err);
@@ -260,83 +339,77 @@ Evaluation Rules:
 - Write spoken_feedback under 30 words in your persona voice.
 - Write ideal_answer in first-person ("I...") between 90 and 130 words showing a model response.`;
 
-      const response = await ai.models.generateContent({
-        model: MODEL_ID,
+      const parsed = await generateJsonWithFailover(ai, {
         contents: prompt,
-        config: {
-          systemInstruction: `${personaDirective}\nYou are a fair, experienced interview coach evaluating a candidate response. Return strictly valid JSON matching the schema.`,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              scores: {
-                type: Type.OBJECT,
-                properties: {
-                  relevance: { type: Type.NUMBER },
-                  depth: { type: Type.NUMBER },
-                  clarity: { type: Type.NUMBER },
-                  structure: { type: Type.NUMBER },
-                  confidence: { type: Type.NUMBER },
-                },
-                required: ['relevance', 'depth', 'clarity', 'structure', 'confidence'],
+        systemInstruction: `${personaDirective}\nYou are a fair, experienced interview coach evaluating a candidate response. Return strictly valid JSON matching the schema.`,
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            scores: {
+              type: Type.OBJECT,
+              properties: {
+                relevance: { type: Type.NUMBER },
+                depth: { type: Type.NUMBER },
+                clarity: { type: Type.NUMBER },
+                structure: { type: Type.NUMBER },
+                confidence: { type: Type.NUMBER },
               },
-              rubric_coverage: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    point: { type: Type.STRING },
-                    covered: { type: Type.BOOLEAN },
-                  },
-                  required: ['point', 'covered'],
-                },
-              },
-              star: {
-                type: Type.OBJECT,
-                properties: {
-                  applicable: { type: Type.BOOLEAN },
-                  situation: { type: Type.BOOLEAN },
-                  task: { type: Type.BOOLEAN },
-                  action: { type: Type.BOOLEAN },
-                  result: { type: Type.BOOLEAN },
-                },
-                required: ['applicable', 'situation', 'task', 'action', 'result'],
-              },
-              strengths: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-              },
-              improvements: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-              },
-              needs_follow_up: { type: Type.BOOLEAN },
-              follow_up_question: { type: Type.STRING, nullable: true },
-              follow_up_reason: { type: Type.STRING, nullable: true },
-              jd_skills_demonstrated: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-              },
-              spoken_feedback: { type: Type.STRING },
-              ideal_answer: { type: Type.STRING },
+              required: ['relevance', 'depth', 'clarity', 'structure', 'confidence'],
             },
-            required: [
-              'scores',
-              'rubric_coverage',
-              'star',
-              'strengths',
-              'improvements',
-              'needs_follow_up',
-              'jd_skills_demonstrated',
-              'spoken_feedback',
-              'ideal_answer',
-            ],
+            rubric_coverage: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  point: { type: Type.STRING },
+                  covered: { type: Type.BOOLEAN },
+                },
+                required: ['point', 'covered'],
+              },
+            },
+            star: {
+              type: Type.OBJECT,
+              properties: {
+                applicable: { type: Type.BOOLEAN },
+                situation: { type: Type.BOOLEAN },
+                task: { type: Type.BOOLEAN },
+                action: { type: Type.BOOLEAN },
+                result: { type: Type.BOOLEAN },
+              },
+              required: ['applicable', 'situation', 'task', 'action', 'result'],
+            },
+            strengths: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+            improvements: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+            needs_follow_up: { type: Type.BOOLEAN },
+            follow_up_question: { type: Type.STRING, nullable: true },
+            follow_up_reason: { type: Type.STRING, nullable: true },
+            jd_skills_demonstrated: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+            spoken_feedback: { type: Type.STRING },
+            ideal_answer: { type: Type.STRING },
           },
+          required: [
+            'scores',
+            'rubric_coverage',
+            'star',
+            'strengths',
+            'improvements',
+            'needs_follow_up',
+            'jd_skills_demonstrated',
+            'spoken_feedback',
+            'ideal_answer',
+          ],
         },
       });
 
-      const rawText = response.text ?? '';
-      const parsed = JSON.parse(stripMarkdownFences(rawText));
       res.json(parsed);
     } catch (err) {
       const { status, message } = formatApiError(err);
@@ -426,65 +499,151 @@ Provide:
 - body_language_tip: 1 concise coaching note if webcam presence telemetry is available, else null
 - closing_line: motivating 1-sentence sign-off in persona tone`;
 
-      const response = await ai.models.generateContent({
-        model: MODEL_ID,
+      const parsed = await generateJsonWithFailover(ai, {
         contents: prompt,
-        config: {
-          systemInstruction: `${personaDirective}\nYou are an executive career coach synthesizing cross-interview patterns. Return strictly valid JSON matching the schema.`,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              verdict: { type: Type.STRING },
-              headline: { type: Type.STRING },
-              top_strengths: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-              },
-              top_weaknesses: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-              },
-              improvement_plan: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    step: { type: Type.STRING },
-                    exercise: { type: Type.STRING },
-                  },
-                  required: ['step', 'exercise'],
-                },
-              },
-              practice_questions: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-              },
-              resume_highlights_to_mention: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-              },
-              body_language_tip: { type: Type.STRING, nullable: true },
-              closing_line: { type: Type.STRING },
+        systemInstruction: `${personaDirective}\nYou are an executive career coach synthesizing cross-interview patterns. Return strictly valid JSON matching the schema.`,
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            verdict: { type: Type.STRING },
+            headline: { type: Type.STRING },
+            top_strengths: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
             },
-            required: [
-              'verdict',
-              'headline',
-              'top_strengths',
-              'top_weaknesses',
-              'improvement_plan',
-              'practice_questions',
-              'resume_highlights_to_mention',
-              'closing_line',
-            ],
+            top_weaknesses: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+            improvement_plan: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  step: { type: Type.STRING },
+                  exercise: { type: Type.STRING },
+                },
+                required: ['step', 'exercise'],
+              },
+            },
+            practice_questions: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+            resume_highlights_to_mention: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+            body_language_tip: { type: Type.STRING, nullable: true },
+            closing_line: { type: Type.STRING },
           },
+          required: [
+            'verdict',
+            'headline',
+            'top_strengths',
+            'top_weaknesses',
+            'improvement_plan',
+            'practice_questions',
+            'resume_highlights_to_mention',
+            'closing_line',
+          ],
         },
       });
 
-      const rawText = response.text ?? '';
-      const parsed = JSON.parse(stripMarkdownFences(rawText));
       res.json(parsed);
     } catch (err) {
+      const { status, message } = formatApiError(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
+  // Neural Text-to-Speech (gemini-3.8-flash-lite-tts on v1beta)
+  app.post('/api/gemini/tts', async (req, res) => {
+    try {
+      const ai = getClient(req, 'v1beta');
+      const { text, persona } = req.body as {
+        text: string;
+        persona?: string;
+      };
+
+      const cleaned = (text || '').trim().slice(0, 1200);
+      if (!cleaned) {
+        res.status(400).json({ error: 'Text is required for TTS.' });
+        return;
+      }
+
+      const voiceMap: Record<string, { voiceName: string; style: string }> = {
+        friendly_hr: {
+          voiceName: 'Kore',
+          style: 'Warm, clear, encouraging HR interviewer speaking naturally',
+        },
+        strict_tech: {
+          voiceName: 'Charon',
+          style: 'Clear, calm, articulate senior engineering lead speaking naturally',
+        },
+        pressure_ceo: {
+          voiceName: 'Zephyr',
+          style: 'Crisp, poised, executive startup CEO speaking clearly and directly',
+        },
+      };
+
+      const chosen = voiceMap[persona || 'strict_tech'] ?? voiceMap.strict_tech;
+
+      const ttsModels = ['gemini-3.8-flash-tts', 'gemini-3.8-flash-lite-tts'];
+      let base64Audio: string | undefined;
+      let lastErr: unknown;
+
+      for (const ttsModel of ttsModels) {
+        try {
+          const response = await withTimeout(
+            ai.models.generateContent({
+              model: ttsModel,
+              contents: [
+                {
+                  role: 'user',
+                  parts: [
+                    {
+                      text: cleaned,
+                      speechMetadata: {
+                        style: chosen.style,
+                      },
+                    },
+                  ],
+                },
+              ],
+              config: {
+                responseModalities: ['AUDIO'],
+                speechConfig: {
+                  voiceConfig: {
+                    prebuiltVoiceConfig: { voiceName: chosen.voiceName },
+                  },
+                },
+              },
+            }),
+            6000,
+            ttsModel
+          );
+
+          base64Audio =
+            response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+          if (base64Audio) break;
+        } catch (err) {
+          lastErr = err;
+          if (!shouldFailoverError(err)) {
+            throw err;
+          }
+        }
+      }
+
+      if (!base64Audio) {
+        if (lastErr) throw lastErr;
+        res.status(502).json({ error: 'No audio data returned by TTS model.' });
+        return;
+      }
+
+      res.json({ audioBase64: base64Audio, mimeType: 'audio/wav' });
+    } catch (err) {
+      console.error('[TTS error]', err instanceof Error ? err.message : err);
       const { status, message } = formatApiError(err);
       res.status(status).json({ error: message });
     }

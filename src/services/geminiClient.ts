@@ -58,11 +58,14 @@ async function postWithRetry<T>(
   url: string,
   payload: unknown,
   apiKey: string,
-  retries = 2
+  retries = 1
 ): Promise<T> {
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 14500);
+
     try {
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
@@ -75,6 +78,7 @@ async function postWithRetry<T>(
         method: 'POST',
         headers,
         body: JSON.stringify(payload),
+        signal: controller.signal,
       });
 
       const data = await res.json();
@@ -84,7 +88,11 @@ async function postWithRetry<T>(
           typeof data?.error === 'string'
             ? data.error
             : `Server responded with status ${res.status}`;
-        throw new Error(msg);
+        const err = new Error(msg) as Error & { noRetry?: boolean };
+        if (res.status >= 400 && res.status < 500) {
+          err.noRetry = true;
+        }
+        throw err;
       }
 
       if (typeof data?.rawText === 'string') {
@@ -92,11 +100,20 @@ async function postWithRetry<T>(
       }
       return data as T;
     } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-      if (attempt < retries) {
-        const delayMs = 600 * Math.pow(2, attempt);
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      lastError =
+        err instanceof Error && err.name === 'AbortError'
+          ? new Error('Request timed out. Retry or use Demo Mode.')
+          : err instanceof Error
+          ? err
+          : new Error(String(err));
+      const noRetry = (err as Error & { noRetry?: boolean })?.noRetry;
+      if (noRetry || attempt >= retries) {
+        break;
       }
+      const delayMs = 450 * Math.pow(2, attempt);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    } finally {
+      window.clearTimeout(timeoutId);
     }
   }
 
@@ -145,7 +162,7 @@ export async function fetchInterviewQuestions(
         jdSkills: config.jd.extractedSkills,
       },
       config.apiKey,
-      1
+      0
     );
 
     if (!data?.questions || !Array.isArray(data.questions) || data.questions.length === 0) {

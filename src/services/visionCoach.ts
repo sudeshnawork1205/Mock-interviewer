@@ -47,16 +47,29 @@ export async function getFaceLandmarker(): Promise<FaceLandmarkerInstance> {
       MEDIAPIPE_WASM_ROOT
     );
 
-    return visionModule.FaceLandmarker.createFromOptions(filesetResolver, {
-      baseOptions: {
-        modelAssetPath: FACE_LANDMARKER_MODEL_URL,
-        delegate: 'GPU',
-      },
-      runningMode: 'VIDEO',
-      numFaces: 1,
-      outputFaceBlendshapes: true,
-      outputFacialTransformationMatrixes: true,
-    });
+    try {
+      return await visionModule.FaceLandmarker.createFromOptions(filesetResolver, {
+        baseOptions: {
+          modelAssetPath: FACE_LANDMARKER_MODEL_URL,
+          delegate: 'GPU',
+        },
+        runningMode: 'VIDEO',
+        numFaces: 1,
+        outputFaceBlendshapes: true,
+        outputFacialTransformationMatrixes: true,
+      });
+    } catch {
+      return visionModule.FaceLandmarker.createFromOptions(filesetResolver, {
+        baseOptions: {
+          modelAssetPath: FACE_LANDMARKER_MODEL_URL,
+          delegate: 'CPU',
+        },
+        runningMode: 'VIDEO',
+        numFaces: 1,
+        outputFaceBlendshapes: true,
+        outputFacialTransformationMatrixes: true,
+      });
+    }
   })().catch((err) => {
     cachedLandmarkerPromise = null;
     throw err;

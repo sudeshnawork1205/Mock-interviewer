@@ -1,8 +1,18 @@
-import * as pdfjsLib from 'pdfjs-dist';
-import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import type { JobDescriptionData, ResumeData } from '../types/interview';
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+let pdfjsLoaded = false;
+
+async function getPdfJs() {
+  const [pdfjsLib, workerMod] = await Promise.all([
+    import('pdfjs-dist'),
+    import('pdfjs-dist/build/pdf.worker.min.mjs?url'),
+  ]);
+  if (!pdfjsLoaded) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = workerMod.default;
+    pdfjsLoaded = true;
+  }
+  return pdfjsLib;
+}
 
 const KNOWN_SKILLS = [
   'TypeScript',
@@ -136,6 +146,7 @@ export async function parseResumeFile(file: File): Promise<ResumeData> {
   let rawText = '';
 
   if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+    const pdfjsLib = await getPdfJs();
     const arrayBuffer = await file.arrayBuffer();
     const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
     const pdf = await loadingTask.promise;

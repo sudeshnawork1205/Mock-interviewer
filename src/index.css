@@ -23,7 +23,7 @@
 
 @keyframes soundwaveBar {
   0%, 100% {
-    transform: scaleY(0.3);
+    transform: scaleY(0.28);
   }
   50% {
     transform: scaleY(1);
@@ -32,7 +32,93 @@
 
 .soundwave-bar {
   transform-origin: center;
-  animation: soundwaveBar 0.75s ease-in-out infinite;
+  animation: soundwaveBar 0.72s ease-in-out infinite;
+}
+
+/* Digital Human Avatar: Steady Portrait Frame + Volume-Reactive Indicator Classes */
+.digital-avatar-idle,
+.digital-avatar-listening,
+.digital-avatar-speaking-soft,
+.digital-avatar-speaking-medium,
+.digital-avatar-speaking-peak {
+  transform: none;
+  transition: filter 180ms ease-out;
+}
+
+.digital-avatar-speaking-medium {
+  filter: brightness(1.02);
+}
+
+.digital-avatar-speaking-peak {
+  filter: brightness(1.05) contrast(1.02);
+}
+
+@keyframes avatarHaloPulseSoft {
+  0%, 100% {
+    transform: scale(0.98);
+    opacity: 0.5;
+  }
+  50% {
+    transform: scale(1.08);
+    opacity: 0.8;
+  }
+}
+
+@keyframes avatarHaloPulseMedium {
+  0%, 100% {
+    transform: scale(0.98);
+    opacity: 0.65;
+  }
+  50% {
+    transform: scale(1.18);
+    opacity: 0.95;
+  }
+}
+
+@keyframes avatarHaloPulsePeak {
+  0%, 100% {
+    transform: scale(1.04);
+    opacity: 0.8;
+  }
+  50% {
+    transform: scale(1.28);
+    opacity: 1;
+  }
+}
+
+@keyframes avatarResonanceGlow {
+  0%, 100% {
+    opacity: 0.18;
+  }
+  50% {
+    opacity: 0.48;
+  }
+}
+
+.avatar-halo-idle {
+  opacity: 0.25;
+  transform: scale(1);
+  transition: transform 180ms ease-out, opacity 180ms ease-out;
+}
+
+.avatar-halo-listening {
+  animation: avatarHaloPulseSoft 1.8s ease-in-out infinite;
+}
+
+.avatar-halo-speaking-soft {
+  animation: avatarHaloPulseSoft 0.85s ease-in-out infinite;
+}
+
+.avatar-halo-speaking-medium {
+  animation: avatarHaloPulseMedium 0.52s ease-in-out infinite;
+}
+
+.avatar-halo-speaking-peak {
+  animation: avatarHaloPulsePeak 0.34s ease-in-out infinite;
+}
+
+.avatar-resonance-active {
+  animation: avatarResonanceGlow 0.55s ease-in-out infinite;
 }
 
 @keyframes micPulseRing {
@@ -56,7 +142,17 @@
 
 @media (prefers-reduced-motion: reduce) {
   .soundwave-bar,
-  .mic-pulse-ring {
+  .mic-pulse-ring,
+  .digital-avatar-idle,
+  .digital-avatar-listening,
+  .digital-avatar-speaking-soft,
+  .digital-avatar-speaking-medium,
+  .digital-avatar-speaking-peak,
+  .avatar-halo-listening,
+  .avatar-halo-speaking-soft,
+  .avatar-halo-speaking-medium,
+  .avatar-halo-speaking-peak,
+  .avatar-resonance-active {
     animation: none !important;
   }
 }

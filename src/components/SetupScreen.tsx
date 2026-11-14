@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Clock,
   Eye,
   EyeOff,
   FileText,
@@ -11,6 +12,7 @@ import {
   Mic,
   Play,
   ShieldCheck,
+  Trash2,
   Upload,
   Volume2,
   X,
@@ -19,6 +21,7 @@ import {
   PERSONAS,
   type ExperienceLevel,
   type InterviewMode,
+  type InterviewSessionResult,
   type InterviewSetupConfig,
   type PersonaId,
   type QuestionVolume,
@@ -55,8 +58,11 @@ interface SetupScreenProps {
   hasServerKey: boolean;
   isStarting: boolean;
   startError: string | null;
+  history: InterviewSessionResult[];
   onChangeConfig: (updater: (prev: InterviewSetupConfig) => InterviewSetupConfig) => void;
   onStartInterview: () => void;
+  onOpenHistorySession: (session: InterviewSessionResult) => void;
+  onClearHistory: () => void;
 }
 
 export function SetupScreen({
@@ -64,8 +70,11 @@ export function SetupScreen({
   hasServerKey,
   isStarting,
   startError,
+  history,
   onChangeConfig,
   onStartInterview,
+  onOpenHistorySession,
+  onClearHistory,
 }: SetupScreenProps) {
   const [personalizationOpen, setPersonalizationOpen] = useState(
     Boolean(config.resume || config.jd.rawText)
@@ -75,6 +84,11 @@ export function SetupScreen({
   const [resumeParsing, setResumeParsing] = useState(false);
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+
+  // Mini live webcam preview pill when Webcam Coach is enabled
+  const [miniPreviewActive, setMiniPreviewActive] = useState(false);
+  const miniPreviewVideoRef = useRef<HTMLVideoElement | null>(null);
+  const miniPreviewStreamRef = useRef<MediaStream | null>(null);
 
   // Pre-flight mic & camera test state
   const [preflightOpen, setPreflightOpen] = useState(false);
@@ -122,9 +136,46 @@ export function SetupScreen({
     };
   }, [config.selectedVoiceURI, onChangeConfig]);
 
+  const stopMiniPreview = () => {
+    if (miniPreviewStreamRef.current) {
+      miniPreviewStreamRef.current.getTracks().forEach((t) => t.stop());
+      miniPreviewStreamRef.current = null;
+    }
+    setMiniPreviewActive(false);
+  };
+
+  const toggleMiniPreview = async () => {
+    if (miniPreviewActive) {
+      stopMiniPreview();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 320, height: 240, facingMode: 'user' },
+      });
+      miniPreviewStreamRef.current = stream;
+      setMiniPreviewActive(true);
+      requestAnimationFrame(() => {
+        if (miniPreviewVideoRef.current) {
+          miniPreviewVideoRef.current.srcObject = stream;
+          void miniPreviewVideoRef.current.play();
+        }
+      });
+    } catch {
+      setMiniPreviewActive(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!config.webcamCoachEnabled) {
+      stopMiniPreview();
+    }
+  }, [config.webcamCoachEnabled]);
+
   useEffect(() => {
     return () => {
       stopPreflightChecks();
+      stopMiniPreview();
     };
   }, []);
 
@@ -289,7 +340,7 @@ export function SetupScreen({
             Configure your mock interview
           </h1>
           <p className="mt-2 text-base text-slate-600 leading-relaxed">
-            Tailor the interviewer persona, attach your resume and target job description,
+            Choose a live interviewer persona, attach your resume and target job description,
             and run a private mic &amp; vision pre-flight check before starting.
           </p>
         </div>
@@ -622,7 +673,7 @@ export function SetupScreen({
                 02. Interviewer Persona
               </h2>
               <span className="text-xs text-slate-500">
-                Calibrates question rigor, tone &amp; speech pacing
+                Live video-call portrait, rigor &amp; speech pacing
               </span>
             </div>
 
@@ -826,6 +877,57 @@ export function SetupScreen({
               </div>
             )}
           </section>
+
+          {/* Recent Practice History */}
+          {history.length > 0 && (
+            <section className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div className="inline-flex items-center gap-2 text-base font-semibold text-slate-900">
+                  <Clock className="w-4 h-4 text-slate-500" />
+                  Recent Practice Sessions
+                </div>
+                <button
+                  type="button"
+                  onClick={onClearHistory}
+                  className="inline-flex items-center gap-1 text-xs text-slate-500 hover:text-red-600 cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Clear history
+                </button>
+              </div>
+
+              <div className="divide-y divide-slate-100">
+                {history.slice(0, 4).map((item, idx) => (
+                  <div
+                    key={`${item.completedAt}-${idx}`}
+                    className="py-3 flex items-center justify-between gap-4"
+                  >
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-slate-900 truncate">
+                        {item.effectiveRole} · {item.config.level}
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        {PERSONAS[item.config.persona].name} · {item.summary.verdict} ·{' '}
+                        {new Date(item.completedAt).toLocaleDateString()}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3 shrink-0">
+                      <span className="text-sm font-bold font-mono tabular-nums text-slate-900">
+                        {item.overallScore}/100
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => onOpenHistorySession(item)}
+                        className="px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-md cursor-pointer"
+                      >
+                        View Report
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
         </div>
 
         {/* Right Controls & Launch Column */}
@@ -858,28 +960,57 @@ export function SetupScreen({
               />
             </label>
 
-            {/* Webcam Coach toggle */}
-            <label className="flex items-start justify-between gap-4 cursor-pointer">
-              <div>
-                <div className="text-sm font-medium text-slate-900">
-                  Webcam Vision Coach
+            {/* Webcam Coach toggle + live preview option */}
+            <div className="space-y-2.5">
+              <label className="flex items-start justify-between gap-4 cursor-pointer">
+                <div>
+                  <div className="text-sm font-medium text-slate-900">
+                    Webcam Vision Coach
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    Tracks eye contact (±15°), smile &amp; head stability locally
+                  </div>
                 </div>
-                <div className="text-xs text-slate-500">
-                  Tracks eye contact (±15°), smile &amp; head stability locally
+                <input
+                  type="checkbox"
+                  checked={config.webcamCoachEnabled}
+                  onChange={(e) =>
+                    onChangeConfig((prev) => ({
+                      ...prev,
+                      webcamCoachEnabled: e.target.checked,
+                    }))
+                  }
+                  className="mt-1 h-4 w-4 accent-blue-600 rounded cursor-pointer"
+                />
+              </label>
+
+              {config.webcamCoachEnabled && (
+                <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] text-slate-600">
+                      100% private browser camera processing
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void toggleMiniPreview()}
+                      className="text-[11px] font-medium text-blue-600 hover:underline cursor-pointer"
+                    >
+                      {miniPreviewActive ? 'Hide preview' : 'Preview camera'}
+                    </button>
+                  </div>
+                  {miniPreviewActive && (
+                    <div className="aspect-[16/9] w-full rounded-md bg-slate-900 overflow-hidden">
+                      <video
+                        ref={miniPreviewVideoRef}
+                        muted
+                        playsInline
+                        className="w-full h-full object-cover -scale-x-100"
+                      />
+                    </div>
+                  )}
                 </div>
-              </div>
-              <input
-                type="checkbox"
-                checked={config.webcamCoachEnabled}
-                onChange={(e) =>
-                  onChangeConfig((prev) => ({
-                    ...prev,
-                    webcamCoachEnabled: e.target.checked,
-                  }))
-                }
-                className="mt-1 h-4 w-4 accent-blue-600 rounded cursor-pointer"
-              />
-            </label>
+              )}
+            </div>
 
             {/* Voice selector */}
             <div>
@@ -888,7 +1019,7 @@ export function SetupScreen({
                 className="flex items-center gap-1.5 text-sm font-medium text-slate-700 mb-1.5"
               >
                 <Volume2 className="w-4 h-4 text-slate-500" />
-                Interviewer Voice
+                Fallback Browser Voice
               </label>
               <select
                 id="voice-select"
@@ -902,7 +1033,7 @@ export function SetupScreen({
                 className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
               >
                 {voices.length === 0 ? (
-                  <option value="">Browser Default Voice</option>
+                  <option value="">Auto-Select Clearest Voice</option>
                 ) : (
                   voices.map((v) => (
                     <option key={v.voiceURI} value={v.voiceURI}>
@@ -911,6 +1042,9 @@ export function SetupScreen({
                   ))
                 )}
               </select>
+              <p className="mt-1 text-[11px] text-slate-500">
+                Uses Gemini HD studio voices in Live mode; falls back here in Demo Mode.
+              </p>
             </div>
 
             <hr className="border-slate-100" />
@@ -1026,6 +1160,7 @@ export function SetupScreen({
               disabled={!canStart || isStarting}
               onClick={() => {
                 stopPreflightChecks();
+                stopMiniPreview();
                 onStartInterview();
               }}
               className="w-full py-3 px-5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-semibold text-sm rounded-lg transition-colors inline-flex items-center justify-center gap-2 cursor-pointer"
